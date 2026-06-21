@@ -86,37 +86,37 @@ def search(query: str, top_k: int = 3) -> list[dict]:
     metadatas = results["metadatas"][0] if results["metadatas"] else []
 
     return [
-        {"text": doc, "filename": (meta or {}).get("filename", "鏈�鐭�")}
+        {"text": doc, "filename": (meta or {}).get("filename", "未知")}
         for doc, meta in zip(documents, metadatas)
     ]
 
 def build_prompt(question: str, chunks: list[dict]) -> str:
     context_parts = []
     for chunk in chunks:
-        context_parts.append(f"[鏉ユ簮: {chunk['filename']}]\n{chunk['text']}")
+        context_parts.append(f"[来源: {chunk['filename']}]\n{chunk['text']}")
     context = "\n\n---\n\n".join(context_parts)
-    prompt = f"""浣犳槸涓€涓�涓撲笟鐨勬枃妗ｅ垎鏋愬姪鎵嬨€傝�锋牴鎹�浠ヤ笅鍙傝€冭祫鏂欏洖绛旂敤鎴风殑闂�棰樸€�
+    prompt = f"""你是一个专业的文档分析助手。请根据以下参考资料回答用户的问题。
 
-鍥炵瓟鏍煎紡瑕佹眰锛�
-1. 浣跨敤 Markdown 鏍煎紡杈撳嚭
-2. 闀挎�佃惤浣跨敤椤圭洰绗﹀彿鎷嗚В锛岀�佹�㈣緭鍑轰竴澶ф�垫枃瀛�
-3. 澶氫釜瑕佺偣浣跨敤鍔犵矖鏍囬�樻垨鏁板瓧鍒楄〃
-4. 鐩存帴缁欏嚭缁撹�猴紝閬垮厤鍐椾綑搴熻瘽
-5. 涓嶈�佹爣娉ㄥ紩鐢ㄦ潵婧愶紝鐩存帴闄堣堪浜嬪疄
+回答格式要求：
+1. 使用 Markdown 格式输出
+2. 长段落使用项目符号拆解，禁止输出一大段文字
+3. 多个要点使用加粗标题或数字列表
+4. 直接给出结论，避免冗余废话
+5. 不要标注引用来源，直接陈述事实
 
-鍥炵瓟缁撴瀯锛�
-- 鍏堢粰鍑烘牳蹇冩€荤粨锛堜竴鍙ヨ瘽缁撹�猴級
-- 鍐嶈�︾粏鎷嗚В锛堝垎鐐归檲杩帮級
-- 鏈€鍚庤ˉ鍏呭缓璁�锛堝�傛灉閫傜敤锛�
+回答结构：
+- 先给出核心总结（一句话结论）
+- 再详细拆解（分点陈述）
+- 最后补充建议（如果适用）
 
-瑙勫垯锛�
-- 鍙�鍩轰簬鎻愪緵鐨勫弬鑰冭祫鏂欏洖绛旓紝涓嶈�佺紪閫犱俊鎭�
-- 濡傛灉鍙傝€冭祫鏂欎腑娌℃湁鐩稿叧淇℃伅锛岃�风洿鎺ヨ��"鏍规嵁鐜版湁璧勬枡锛屾棤娉曞洖绛旇繖涓�闂�棰�"
+规则：
+- 只基于提供的参考资料回答，不要编造信息
+- 如果参考资料中没有相关信息，请直接说"根据现有资料，无法回答这个问题"
 
-鍙傝€冭祫鏂欙細
+参考资料：
 {context}
 
-鐢ㄦ埛闂�棰橈細{question}"""
+用户问题：{question}"""
     return prompt
 
 @app.get("/history/")
@@ -140,13 +140,10 @@ async def chat(request: schemas.ChatRequest):
     question = request.question
     model_name = request.model or "mimo"
 
-    # 1. 妫€绱㈢浉鍏虫枃妗�
     chunks = search(question, top_k=3)
 
-    # 2. 鏋勫缓 prompt
     prompt = build_prompt(question, chunks)
 
-    # 3. 璋冪敤 API
     config = MODEL_CONFIGS.get(model_name, MODEL_CONFIGS["mimo"])
     client = get_ai_client(model_name)
     response = client.messages.create(
@@ -156,7 +153,6 @@ async def chat(request: schemas.ChatRequest):
     )
     answer = response.content[0].text
 
-    # 4. 瀛樺叆鏁版嵁搴�
     db = SessionLocal()
     try:
         db.add(models.ChatHistory(question=question, answer=answer))
@@ -164,7 +160,6 @@ async def chat(request: schemas.ChatRequest):
     finally:
         db.close()
 
-    # 5. 杩斿洖缁撴灉
     return {
         "question": question,
         "answer": answer,
@@ -176,13 +171,10 @@ async def chat_stream(request: schemas.ChatRequest):
     question = request.question
     model_name = request.model or "mimo"
 
-    # 1. 妫€绱㈢浉鍏虫枃妗�
     chunks = search(question, top_k=3)
 
-    # 2. 鏋勫缓 prompt
     prompt = build_prompt(question, chunks)
 
-    # 3. 璋冪敤 API (娴佸紡)
     config = MODEL_CONFIGS.get(model_name, MODEL_CONFIGS["mimo"])
     client = get_ai_client(model_name)
 
@@ -197,7 +189,6 @@ async def chat_stream(request: schemas.ChatRequest):
                 full_answer += text
                 yield f"data: {json.dumps({'text': text, 'done': False})}\n\n"
 
-        # 瀛樺叆鏁版嵁搴�
         db = SessionLocal()
         try:
             db.add(models.ChatHistory(question=question, answer=full_answer))
@@ -205,7 +196,7 @@ async def chat_stream(request: schemas.ChatRequest):
         finally:
             db.close()
 
-        # 鍙戦€佸畬鎴愪俊鍙�
+        # 发送完成信号
         yield f"data: {json.dumps({'text': '', 'done': True, 'references': [c['text'] for c in chunks]})}\n\n"
 
     return StreamingResponse(
@@ -227,7 +218,7 @@ async def upload_file(file: UploadFile):
     text = extract_text(filepath)
     chunks = split_text(text)
 
-    # 鍒犻櫎鍚屼竴鏂囦欢鐨勬棫鏁版嵁锛堝�傛灉閲嶆柊涓婁紶锛�
+    # 删除同一文件的旧数据（如果重新上传）
     try:
         ids_to_delete = []
         for i in range(100):
@@ -242,7 +233,7 @@ async def upload_file(file: UploadFile):
     except Exception:
         pass
 
-    # 鎶婃瘡鍧楀彉鎴愬悜閲忓苟瀛樺叆 ChromaDB
+    # 把每块变成向量并存入 ChromaDB
     for i, chunk in enumerate(chunks):
         vector = get_embedding(chunk)
         collection.add(
@@ -255,7 +246,7 @@ async def upload_file(file: UploadFile):
     return {
         "filename": file.filename,
         "chunks_count": len(chunks),
-        "message": "宸插瓨鍏ュ悜閲忔暟鎹�搴�"
+        "message": "已存入向量数据库"
     }
 
 @app.post("/search/")
@@ -266,5 +257,8 @@ async def search_data(question: str):
         "results": results
     }
     
+
+
+
 
 
