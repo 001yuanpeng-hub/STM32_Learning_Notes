@@ -1,0 +1,16 @@
+node_modules/
+__pycache__/
+*.pyc
+.env
+venv/
+uploads/
+chroma_db/
+.DS_Store
+*.db
+.vscode/
+test*.txt
+backend/test_claude.py
+frontend/README.md
+frontend/src/assets/vite.svg
+frontend/src/assets/vue.svg
+frontend/src/components/HelloWorld.vue

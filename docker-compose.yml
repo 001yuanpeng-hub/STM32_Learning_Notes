@@ -1,0 +1,33 @@
+﻿services:
+  mysql:
+    image: mysql:8.0
+    container_name: rag-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: fastapi_db
+    ports:
+      - "3307:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+
+  backend:
+    build: ./backend
+    container_name: rag-backend
+    ports:
+      - "8000:8000"
+    depends_on:
+      - mysql
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL}
+
+  frontend:
+    build: ./frontend
+    container_name: rag-frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+
+volumes:
+  mysql_data:
