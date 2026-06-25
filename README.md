@@ -20,7 +20,7 @@
 - 基于语义检索的智能问答（非关键词匹配）
 - SSE 流式回答，打字机效果实时展示
 - 支持 MiMo / Claude 模型一键切换
-- 聊天历史持久化存储
+- 聊天历史持久化存储，页面刷新不丢失
 
 ## 项目结构
 
@@ -47,8 +47,22 @@
 ```bash
 # 1. 配置环境变量
 cp backend/.env.example backend/.env
-# 编辑 .env 填入你的 API Key
+```
 
+编辑 `backend/.env`
+
+```env
+# MiMo / Claude API
+ANTHROPIC_API_KEY=your_api_key
+ANTHROPIC_BASE_URL=https://api.xiaomimimo.com/anthropic
+CLAUDE_API_KEY=your_api_key
+CLAUDE_BASE_URL=https://api.anthropic.com
+
+# MySQL
+DATABASE_URL=mysql+pymysql://root:root@localhost:3306/fastapi_db
+```
+
+```bash
 # 2. 启动后端
 cd backend && pip install -r requirements.txt && uvicorn main:app --reload
 
@@ -60,11 +74,47 @@ cd frontend && npm install && npm run dev
 
 ## Docker 部署
 
+在项目根目录创建 `.env` 文件：
+
+```env
+# MiMo / Claude API
+ANTHROPIC_API_KEY=your_api_key
+ANTHROPIC_BASE_URL=https://api.xiaomimimo.com/anthropic
+CLAUDE_API_KEY=your_api_key
+CLAUDE_BASE_URL=https://api.anthropic.com
+```
+
 ```bash
-# 在项目根目录创建 .env，填入 API Key
 docker-compose up -d --build
 # 访问 http://localhost
 ```
+
+## API 接口
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `POST` | `/upload/` | 上传文档，自动分块并向量化 |
+| `POST` | `/chat/` | 普通问答（返回完整回答） |
+| `POST` | `/chat/stream/` | 流式问答（SSE 逐步返回） |
+| `GET`  | `/history/` | 获取聊天历史记录 |
+| `POST` | `/search/` | 仅检索，不调用 LLM |
+
+## RAG 流程
+
+```
+用户提问 → 文本向量化 → ChromaDB 语义检索 Top-3
+    → 构建 Prompt（指令 + 上下文 + 问题）
+    → LLM 生成回答 → SSE 流式返回
+```
+
+## 环境变量
+
+| 变量名 | 必填 | 说明 |
+|--------|------|------|
+| `ANTHROPIC_API_KEY` | 是 | MiMo API 密钥 |
+| `ANTHROPIC_BASE_URL` | 是 | MiMo API 地址 |
+| `CLAUDE_API_KEY` | 否 | Claude API 密钥 |
+| `DATABASE_URL` | 否 | MySQL 连接地址 |
 
 ## 演示
 
