@@ -21,6 +21,7 @@
 - SSE 流式回答，打字机效果实时展示
 - 支持 MiMo / Claude 模型一键切换
 - 聊天历史持久化存储，页面刷新不丢失
+- 侧边栏对话管理，支持新建、切换、重命名、删除
 
 ## 项目结构
 
@@ -36,7 +37,8 @@
 │   ├── src/
 │   │   ├── App.vue
 │   │   └── components/
-│   │       └── ChatBox.vue  # 聊天界面核心组件
+│   │       ├── ChatBox.vue  # 聊天界面核心组件
+│   │       └── Sidebar.vue  # 侧边栏对话管理
 │   ├── vite.config.js    # Vite 配置（含 API 代理）
 │   └── package.json
 └── docker-compose.yml    # 一键容器化部署
@@ -94,10 +96,12 @@ docker-compose up -d --build
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | `POST` | `/upload/` | 上传文档，自动分块并向量化 |
-| `POST` | `/chat/` | 普通问答（返回完整回答） |
 | `POST` | `/chat/stream/` | 流式问答（SSE 逐步返回） |
-| `GET`  | `/history/` | 获取聊天历史记录 |
-| `POST` | `/search/` | 仅检索，不调用 LLM |
+| `GET` | `/conversations/` | 获取对话列表 |
+| `POST` | `/conversations/` | 创建新对话 |
+| `GET` | `/conversations/{id}/messages` | 获取对话消息 |
+| `DELETE` | `/conversations/{id}` | 删除对话 |
+| `PATCH` | `/conversations/{id}` | 重命名对话 |
 
 ## RAG 流程
 
@@ -107,15 +111,6 @@ docker-compose up -d --build
     → LLM 生成回答 → SSE 流式返回
 ```
 
-## 环境变量
-
-| 变量名 | 必填 | 说明 |
-|--------|------|------|
-| `ANTHROPIC_API_KEY` | 是 | MiMo API 密钥 |
-| `ANTHROPIC_BASE_URL` | 是 | MiMo API 地址 |
-| `CLAUDE_API_KEY` | 否 | Claude API 密钥 |
-| `DATABASE_URL` | 否 | MySQL 连接地址 |
-
 ## 演示
 
-[演示视频](./demo.mp4)
+![demo](./demo.gif)
