@@ -1,145 +1,156 @@
-﻿<template>
+<template>
   <div class="chat-app">
-    <!-- 顶部导航 -->
-    <header class="header">
-      <div class="container">
-        <div class="logo">
-          <div class="logo-mark">
-            <svg width="28" height="28" viewBox="0 0 32 32" fill="none">
-              <path d="M6 4L14 16L10 28H13L16 20L19 28H22L18 16L26 4H23L16 14L9 4H6Z" fill="url(#gradient)"/>
-              <defs>
-                <linearGradient id="gradient" x1="6" y1="4" x2="26" y2="28">
-                  <stop stop-color="#6366f1"/>
-                  <stop offset="1" stop-color="#8b5cf6"/>
-                </linearGradient>
-              </defs>
+    <Sidebar
+      :isOpen="sidebarOpen"
+      :conversations="conversations"
+      :activeId="currentConversationId"
+      @new-chat="newChat"
+      @select="selectConversation"
+      @delete="deleteConversation"
+      @close="sidebarOpen = false"
+      @renamed="loadConversations"
+    />
+
+    <div class="main">
+      <!-- 顶部导航 -->
+      <header class="header">
+        <div class="header-inner">
+          <button class="menu-btn" @click="sidebarOpen = !sidebarOpen">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="3" y1="6" x2="21" y2="6"/>
+              <line x1="3" y1="12" x2="21" y2="12"/>
+              <line x1="3" y1="18" x2="21" y2="18"/>
             </svg>
-          </div>
-          <span class="logo-text">RAG 知识库</span>
-        </div>
-      </div>
-    </header>
-
-    <!-- 对话区域 -->
-    <main class="messages" ref="messagesRef">
-      <div class="container">
-        <!-- 欢迎界面 -->
-        <div v-if="messages.length === 0" class="welcome">
-          <div class="welcome-mark">
-            <svg width="48" height="48" viewBox="0 0 32 32" fill="none">
-              <path d="M6 4L14 16L10 28H13L16 20L19 28H22L18 16L26 4H23L16 14L9 4H6Z" fill="url(#gradient2)"/>
-              <defs>
-                <linearGradient id="gradient2" x1="6" y1="4" x2="26" y2="28">
-                  <stop stop-color="#6366f1"/>
-                  <stop offset="1" stop-color="#8b5cf6"/>
-                </linearGradient>
-              </defs>
-            </svg>
-          </div>
-          <h1>有什么可以帮你的？</h1>
-        </div>
-
-        <!-- 消息列表 -->
-        <div
-          v-for="(msg, index) in messages"
-          :key="index"
-          :class="['message', msg.role]"
-        >
-          <div class="bubble">
-            <div class="bubble-text" v-html="formatMessage(msg.content)"></div>
-          </div>
-        </div>
-
-        <!-- 加载状态 -->
-        <div v-if="isLoading" class="message ai">
-          <div class="bubble typing">
-            <span class="dot"></span>
-            <span class="dot"></span>
-            <span class="dot"></span>
-          </div>
-        </div>
-      </div>
-    </main>
-
-    <!-- 底部输入区域 -->
-    <footer class="footer">
-      <div class="container">
-        <!-- 已上传文件标签 -->
-        <div v-if="uploadedFile" class="file-tag">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-            <polyline points="14 2 14 8 20 8"/>
-          </svg>
-          <span>{{ uploadedFile }}</span>
-          <button @click="uploadedFile = ''" class="remove-tag">×</button>
-        </div>
-
-        <div class="input-wrapper">
-          <!-- 上传按钮 -->
-          <div class="upload-btn-wrapper" ref="uploadWrapper">
-            <button
-              class="upload-trigger"
-              @click="toggleUploadMenu"
-              :class="{ active: showUploadMenu }"
-            >
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <line x1="12" y1="5" x2="12" y2="19"/>
-                <line x1="5" y1="12" x2="19" y2="12"/>
+          </button>
+          <div class="logo">
+            <div class="logo-mark">
+              <svg width="28" height="28" viewBox="0 0 32 32" fill="none">
+                <path d="M6 4L14 16L10 28H13L16 20L19 28H22L18 16L26 4H23L16 14L9 4H6Z" fill="url(#gradient)"/>
+                <defs>
+                  <linearGradient id="gradient" x1="6" y1="4" x2="26" y2="28">
+                    <stop stop-color="#6366f1"/>
+                    <stop offset="1" stop-color="#8b5cf6"/>
+                  </linearGradient>
+                </defs>
               </svg>
-            </button>
+            </div>
+            <span class="logo-text">RAG 知识库</span>
+          </div>
+        </div>
+      </header>
 
-            <!-- 上传菜单 -->
-            <div v-if="showUploadMenu" class="upload-menu">
-              <input
-                type="file"
-                ref="fileInput"
-                @change="handleFileSelect"
-                accept=".txt,.pdf,.md,.docx"
-                hidden
-              />
-              <button class="menu-item" @click="triggerFileInput">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-                  <polyline points="17 8 12 3 7 8"/>
-                  <line x1="12" y1="3" x2="12" y2="15"/>
-                </svg>
-                <span>上传文档</span>
-                <span class="hint">TXT, PDF, MD, DOCX</span>
-              </button>
+      <!-- 对话区域 -->
+      <main class="messages" ref="messagesRef">
+        <div class="container">
+          <div v-if="messages.length === 0" class="welcome">
+            <div class="welcome-mark">
+              <svg width="48" height="48" viewBox="0 0 32 32" fill="none">
+                <path d="M6 4L14 16L10 28H13L16 20L19 28H22L18 16L26 4H23L16 14L9 4H6Z" fill="url(#gradient2)"/>
+                <defs>
+                  <linearGradient id="gradient2" x1="6" y1="4" x2="26" y2="28">
+                    <stop stop-color="#6366f1"/>
+                    <stop offset="1" stop-color="#8b5cf6"/>
+                  </linearGradient>
+                </defs>
+              </svg>
+            </div>
+            <h1>有什么可以帮你的？</h1>
+          </div>
+
+          <div
+            v-for="(msg, index) in messages"
+            :key="index"
+            :class="['message', msg.role]"
+          >
+            <div class="bubble">
+              <div class="bubble-text" v-html="formatMessage(msg.content)"></div>
             </div>
           </div>
 
-          <!-- 模型选择器 -->
-          <select v-model="selectedModel" class="model-select">
-            <option value="mimo">MiMo</option>
-            <option value="claude">Claude</option>
-          </select>
-
-          <!-- 输入框 -->
-          <input
-            v-model="question"
-            @keyup.enter="send"
-            placeholder="输入你的问题..."
-            :disabled="isLoading"
-            class="message-input"
-          />
-
-          <!-- 发送按钮 -->
-          <button
-            class="send-btn"
-            @click="send"
-            :disabled="isLoading || !question.trim()"
-          >
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <line x1="22" y1="2" x2="11" y2="13"/>
-              <polygon points="22 2 15 22 11 13 2 9 22 2"/>
-            </svg>
-          </button>
+          <div v-if="isLoading" class="message ai">
+            <div class="bubble typing">
+              <span class="dot"></span>
+              <span class="dot"></span>
+              <span class="dot"></span>
+            </div>
+          </div>
         </div>
+      </main>
 
-        <div class="footer-hint">按 Enter 发送</div>
-      </div>
-    </footer>
+      <!-- 底部输入区域 -->
+      <footer class="footer">
+        <div class="container">
+          <div v-if="uploadedFile" class="file-tag">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+              <polyline points="14 2 14 8 20 8"/>
+            </svg>
+            <span>{{ uploadedFile }}</span>
+            <button @click="uploadedFile = ''" class="remove-tag">×</button>
+          </div>
+
+          <div class="input-wrapper">
+            <div class="upload-btn-wrapper" ref="uploadWrapper">
+              <button
+                class="upload-trigger"
+                @click="toggleUploadMenu"
+                :class="{ active: showUploadMenu }"
+              >
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <line x1="12" y1="5" x2="12" y2="19"/>
+                  <line x1="5" y1="12" x2="19" y2="12"/>
+                </svg>
+              </button>
+
+              <div v-if="showUploadMenu" class="upload-menu">
+                <input
+                  type="file"
+                  ref="fileInput"
+                  @change="handleFileSelect"
+                  accept=".txt,.pdf,.md,.docx"
+                  hidden
+                />
+                <button class="menu-item" @click="triggerFileInput">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                    <polyline points="17 8 12 3 7 8"/>
+                    <line x1="12" y1="3" x2="12" y2="15"/>
+                  </svg>
+                  <span>上传文档</span>
+                  <span class="hint">TXT, PDF, MD, DOCX</span>
+                </button>
+              </div>
+            </div>
+
+            <select v-model="selectedModel" class="model-select">
+              <option value="mimo">MiMo</option>
+              <option value="claude">Claude</option>
+            </select>
+
+            <input
+              v-model="question"
+              @keyup.enter="send"
+              placeholder="输入你的问题..."
+              :disabled="isLoading"
+              class="message-input"
+            />
+
+            <button
+              class="send-btn"
+              @click="send"
+              :disabled="isLoading || !question.trim()"
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <line x1="22" y1="2" x2="11" y2="13"/>
+                <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+              </svg>
+            </button>
+          </div>
+
+          <div class="footer-hint">按 Enter 发送</div>
+        </div>
+      </footer>
+    </div>
   </div>
 </template>
 
@@ -147,6 +158,7 @@
 import { ref, nextTick, watch, onMounted, onUnmounted } from 'vue'
 import axios from 'axios'
 import MarkdownIt from 'markdown-it'
+import Sidebar from './Sidebar.vue'
 
 const md = new MarkdownIt({
   html: false,
@@ -162,7 +174,12 @@ const fileInput = ref(null)
 const uploadWrapper = ref(null)
 const showUploadMenu = ref(false)
 const uploadedFile = ref('')
-const selectedModel = ref('mimo')  // 默认选择 MiMo
+const selectedModel = ref('mimo')
+
+// 侧边栏状态
+const sidebarOpen = ref(false)
+const conversations = ref([])
+const currentConversationId = ref(null)
 
 function scrollToBottom() {
   nextTick(() => {
@@ -176,7 +193,6 @@ watch(messages, scrollToBottom, { deep: true })
 
 function formatMessage(text) {
   if (!text) return ''
-  // 使用 markdown-it 渲染 Markdown
   return md.render(text)
 }
 
@@ -220,24 +236,57 @@ function handleClickOutside(e) {
   }
 }
 
-async function loadHistory() {
+// ========== 对话管理 ==========
+
+async function loadConversations() {
   try {
-    const res = await axios.get('/api/history/')
-    const history = res.data
-    for (const record of history) {
+    const res = await axios.get('/api/conversations/')
+    conversations.value = res.data
+  } catch (err) {
+    console.error('加载对话列表失败:', err)
+  }
+}
+
+function newChat() {
+  messages.value = []
+  currentConversationId.value = null
+  sidebarOpen.value = false
+}
+
+async function selectConversation(convId) {
+  currentConversationId.value = convId
+  messages.value = []
+  sidebarOpen.value = false
+
+  try {
+    const res = await axios.get(`/api/conversations/${convId}/messages`)
+    for (const msg of res.data) {
       messages.value.push(
-        { role: 'user', content: record.question },
-        { role: 'ai', content: record.answer }
+        { role: 'user', content: msg.question },
+        { role: 'ai', content: msg.answer }
       )
     }
   } catch (err) {
-    console.error('加载历史记录失败:', err)
+    console.error('加载对话消息失败:', err)
+  }
+}
+
+async function deleteConversation(convId) {
+  try {
+    await axios.delete(`/api/conversations/${convId}`)
+    conversations.value = conversations.value.filter(c => c.id !== convId)
+    if (currentConversationId.value === convId) {
+      messages.value = []
+      currentConversationId.value = null
+    }
+  } catch (err) {
+    console.error('删除对话失败:', err)
   }
 }
 
 onMounted(() => {
   document.addEventListener('click', handleClickOutside)
-  loadHistory()
+  loadConversations()
 })
 
 onUnmounted(() => {
@@ -255,7 +304,6 @@ async function send() {
   question.value = ''
   isLoading.value = true
 
-  // 添加一个空的 AI 消息，用于流式更新
   const aiMessageIndex = messages.value.length
   messages.value.push({
     role: 'ai',
@@ -263,14 +311,17 @@ async function send() {
   })
 
   try {
-    const response = await fetch('/api/chat/stream/', {
+    // SSE 流式请求直接连后端，绕过 Vite 代理缓冲
+    const apiBase = import.meta.env.DEV ? 'http://localhost:8000' : '/api'
+    const response = await fetch(`${apiBase}/chat/stream/`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
         question: userMessage,
-        model: selectedModel.value
+        model: selectedModel.value,
+        conversation_id: currentConversationId.value
       })
     })
 
@@ -289,10 +340,12 @@ async function send() {
           try {
             const data = JSON.parse(line.slice(6))
             if (data.done) {
-              // 流结束
               isLoading.value = false
+              if (data.conversation_id && !currentConversationId.value) {
+                currentConversationId.value = data.conversation_id
+              }
+              loadConversations()
             } else if (data.text) {
-              // 追加文本
               messages.value[aiMessageIndex].content += data.text
               scrollToBottom()
             }
@@ -313,12 +366,18 @@ async function send() {
 <style scoped>
 .chat-app {
   display: flex;
-  flex-direction: column;
+  width: 100%;
   height: 100vh;
   background: #ffffff;
 }
 
-/* 通用容器 */
+.main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
 .container {
   width: 100%;
   max-width: 800px;
@@ -337,10 +396,32 @@ async function send() {
   backdrop-filter: blur(10px);
 }
 
-.header .container {
+.header-inner {
   display: flex;
   align-items: center;
   height: 56px;
+  padding: 0 16px;
+  gap: 12px;
+}
+
+.menu-btn {
+  width: 36px;
+  height: 36px;
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  color: #6b7280;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s;
+  flex-shrink: 0;
+}
+
+.menu-btn:hover {
+  background: #f3f4f6;
+  color: #374151;
 }
 
 .logo {
@@ -435,17 +516,9 @@ async function send() {
   font-weight: 600;
 }
 
-.bubble-text h1 {
-  font-size: 1.25rem;
-}
-
-.bubble-text h2 {
-  font-size: 1.125rem;
-}
-
-.bubble-text h3 {
-  font-size: 1rem;
-}
+.bubble-text h1 { font-size: 1.25rem; }
+.bubble-text h2 { font-size: 1.125rem; }
+.bubble-text h3 { font-size: 1rem; }
 
 .bubble-text p {
   margin-bottom: 8px;

@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile
+from fastapi import FastAPI, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from PyPDF2 import PdfReader
@@ -28,7 +28,7 @@ MODEL_CONFIGS = {
     "claude": {
         "model_name": "claude-sonnet-4-20250514",
         "api_key": os.getenv("CLAUDE_API_KEY"),
-        "base_url": os.getenv("CLAUDE_BASE_URL"),  # 可选，默认官方地址
+        "base_url": os.getenv("CLAUDE_BASE_URL"),
     },
 }
 
@@ -57,7 +57,7 @@ def get_embedding(text: str) -> list[float]:
 
 def extract_text(filepath: str) -> str:
     if filepath.endswith((".txt", ".md")):
-        with open(filepath, 'r', encoding='latin-1') as f:
+        with open(filepath, 'r', encoding='utf-8') as f:
             return f.read()
     elif filepath.endswith(".pdf"):
         reader = PdfReader(filepath)
@@ -79,7 +79,7 @@ def search(query: str, top_k: int = 3) -> list[dict]:
     vector = get_embedding(query)
     results = collection.query(
         query_embeddings = [vector],
-        n_results = top_k
+        n_results = top_k,
     )
 
     documents = results["documents"][0] if results["documents"] else []
@@ -89,6 +89,25 @@ def search(query: str, top_k: int = 3) -> list[dict]:
         {"text": doc, "filename": (meta or {}).get("filename", "未知")}
         for doc, meta in zip(documents, metadatas)
     ]
+
+def is_meta_question(question: str) -> bool:
+    """判断是否为关于系统/文档状态的元问题"""
+    meta_keywords = ["上传了", "有没有文件", "有哪些文档", "文件列表", "文档数量", "几个文件", "多少文档"]
+    return any(kw in question for kw in meta_keywords)
+
+def get_document_status() -> str:
+    """查询当前系统的文档状态"""
+    count = collection.count()
+    if count == 0:
+        return "当前系统中没有上传任何文档。请先上传文件后再提问。"
+    # 获取所有文档的元数据
+    results = collection.get(include=["metadatas"])
+    filenames = set()
+    for meta in results["metadatas"]:
+        if meta and "filename" in meta:
+            filenames.add(meta["filename"])
+    file_list = "\n".join([f"- {name}" for name in sorted(filenames)])
+    return f"当前系统中共有 {count} 个文档片段，来自以下 {len(filenames)} 个文件：\n{file_list}"
 
 def build_prompt(question: str, chunks: list[dict]) -> str:
     context_parts = []
@@ -102,16 +121,12 @@ def build_prompt(question: str, chunks: list[dict]) -> str:
 2. 长段落使用项目符号拆解，禁止输出一大段文字
 3. 多个要点使用加粗标题或数字列表
 4. 直接给出结论，避免冗余废话
-5. 不要标注引用来源，直接陈述事实
-
-回答结构：
-- 先给出核心总结（一句话结论）
-- 再详细拆解（分点陈述）
-- 最后补充建议（如果适用）
 
 规则：
-- 只基于提供的参考资料回答，不要编造信息
-- 如果参考资料中没有相关信息，请直接说"根据现有资料，无法回答这个问题"
+- 优先基于参考资料回答
+- 如果参考资料与问题相关性不高，尽量从已有内容中提取有用信息回答，不要直接拒绝
+- 只有当参考资料完全无关时，才说"未找到相关内容，建议换个方式提问"
+- 对于日常问候（如 hello、你好），自然回应即可
 
 参考资料：
 {context}
@@ -119,85 +134,267 @@ def build_prompt(question: str, chunks: list[dict]) -> str:
 用户问题：{question}"""
     return prompt
 
-@app.get("/history/")
-async def get_history():
-    db = SessionLocal()
-    records = db.query(models.ChatHistory).order_by(models.ChatHistory.created_at.asc()).all()
-    db.close()
 
-    return [
-        {
-            "id": r.id,
-            "question": r.question,
-            "answer": r.answer,
-            "created_at": r.created_at.isoformat()
+# ========== 对话管理接口 ==========
+
+@app.post("/conversations/", response_model=schemas.ConversationResponse)
+async def create_conversation(request: schemas.ConversationCreate):
+    db = SessionLocal()
+    try:
+        title = request.title or "新对话"
+        conv = models.Conversation(title=title)
+        db.add(conv)
+        db.commit()
+        db.refresh(conv)
+        return {
+            "id": conv.id,
+            "title": conv.title,
+            "created_at": conv.created_at
         }
-        for r in records
-    ]
+    finally:
+        db.close()
+
+@app.get("/conversations/")
+async def list_conversations():
+    db = SessionLocal()
+    try:
+        convs = db.query(models.Conversation).order_by(models.Conversation.created_at.desc()).all()
+        return [
+            {
+                "id": c.id,
+                "title": c.title,
+                "created_at": c.created_at.isoformat()
+            }
+            for c in convs
+        ]
+    finally:
+        db.close()
+
+@app.get("/conversations/{conversation_id}/messages")
+async def get_conversation_messages(conversation_id: int):
+    db = SessionLocal()
+    try:
+        conv = db.query(models.Conversation).filter(models.Conversation.id == conversation_id).first()
+        if not conv:
+            raise HTTPException(status_code=404, detail="对话不存在")
+        messages = db.query(models.ChatHistory).filter(
+            models.ChatHistory.conversation_id == conversation_id
+        ).order_by(models.ChatHistory.created_at.asc()).all()
+        return [
+            {
+                "id": m.id,
+                "question": m.question,
+                "answer": m.answer,
+                "created_at": m.created_at.isoformat()
+            }
+            for m in messages
+        ]
+    finally:
+        db.close()
+
+@app.delete("/conversations/{conversation_id}")
+async def delete_conversation(conversation_id: int):
+    db = SessionLocal()
+    try:
+        conv = db.query(models.Conversation).filter(models.Conversation.id == conversation_id).first()
+        if not conv:
+            raise HTTPException(status_code=404, detail="对话不存在")
+        db.delete(conv)
+        db.commit()
+        return {"message": "已删除"}
+    finally:
+        db.close()
+
+@app.patch("/conversations/{conversation_id}")
+async def rename_conversation(conversation_id: int, request: schemas.ConversationCreate):
+    db = SessionLocal()
+    try:
+        conv = db.query(models.Conversation).filter(models.Conversation.id == conversation_id).first()
+        if not conv:
+            raise HTTPException(status_code=404, detail="对话不存在")
+        conv.title = request.title
+        db.commit()
+        return {"id": conv.id, "title": conv.title, "created_at": conv.created_at.isoformat()}
+    finally:
+        db.close()
+
+
+# ========== 聊天接口 ==========
+
+@app.get("/history/")
+async def get_history(conversation_id: int = None):
+    db = SessionLocal()
+    try:
+        query = db.query(models.ChatHistory)
+        if conversation_id:
+            query = query.filter(models.ChatHistory.conversation_id == conversation_id)
+        records = query.order_by(models.ChatHistory.created_at.asc()).all()
+        return [
+            {
+                "id": r.id,
+                "question": r.question,
+                "answer": r.answer,
+                "created_at": r.created_at.isoformat()
+            }
+            for r in records
+        ]
+    finally:
+        db.close()
 
 @app.post("/chat/", response_model=schemas.ChatResponse)
 async def chat(request: schemas.ChatRequest):
     question = request.question
     model_name = request.model or "mimo"
-
-    chunks = search(question, top_k=3)
-
-    prompt = build_prompt(question, chunks)
-
-    config = MODEL_CONFIGS.get(model_name, MODEL_CONFIGS["mimo"])
-    client = get_ai_client(model_name)
-    response = client.messages.create(
-        model=config["model_name"],
-        max_tokens=1024,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    answer = response.content[0].text
+    conversation_id = request.conversation_id
 
     db = SessionLocal()
     try:
-        db.add(models.ChatHistory(question=question, answer=answer))
+        # 如果没有 conversation_id，自动创建新对话
+        if not conversation_id:
+            title = question[:20] + ("..." if len(question) > 20 else "")
+            conv = models.Conversation(title=title)
+            db.add(conv)
+            db.commit()
+            db.refresh(conv)
+            conversation_id = conv.id
+
+        # 元问题：直接返回文档状态，不走 RAG
+        if is_meta_question(question):
+            answer = get_document_status()
+            db.add(models.ChatHistory(
+                question=question,
+                answer=answer,
+                conversation_id=conversation_id
+            ))
+            db.commit()
+            return {
+                "question": question,
+                "answer": answer,
+                "references": [],
+                "conversation_id": conversation_id
+            }
+
+        chunks = search(question, top_k=3)
+        prompt = build_prompt(question, chunks)
+
+        config = MODEL_CONFIGS.get(model_name, MODEL_CONFIGS["mimo"])
+        ai_client = get_ai_client(model_name)
+        response = ai_client.messages.create(
+            model=config["model_name"],
+            max_tokens=1024,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        answer = response.content[0].text
+
+        db.add(models.ChatHistory(
+            question=question,
+            answer=answer,
+            conversation_id=conversation_id
+        ))
         db.commit()
+
+        return {
+            "question": question,
+            "answer": answer,
+            "references": [c["text"] for c in chunks],
+            "conversation_id": conversation_id
+        }
     finally:
         db.close()
-
-    return {
-        "question": question,
-        "answer": answer,
-        "references": [c["text"] for c in chunks]
-    }
 
 @app.post("/chat/stream/")
 async def chat_stream(request: schemas.ChatRequest):
     question = request.question
     model_name = request.model or "mimo"
+    conversation_id = request.conversation_id
+
+    db = SessionLocal()
+
+    # 如果没有 conversation_id，自动创建新对话
+    if not conversation_id:
+        title = question[:20] + ("..." if len(question) > 20 else "")
+        conv = models.Conversation(title=title)
+        db.add(conv)
+        db.commit()
+        db.refresh(conv)
+        conversation_id = conv.id
+
+    db.close()
+
+    # 元问题：直接返回文档状态，不走 RAG
+    if is_meta_question(question):
+        answer = get_document_status()
+        db2 = SessionLocal()
+        try:
+            db2.add(models.ChatHistory(
+                question=question,
+                answer=answer,
+                conversation_id=conversation_id
+            ))
+            db2.commit()
+        finally:
+            db2.close()
+
+        async def generate_meta():
+            yield f"data: {json.dumps({'text': answer, 'done': False})}\n\n"
+            yield f"data: {json.dumps({'text': '', 'done': True, 'conversation_id': conversation_id, 'references': []})}\n\n"
+
+        return StreamingResponse(
+            generate_meta(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "Connection": "keep-alive"}
+        )
 
     chunks = search(question, top_k=3)
-
     prompt = build_prompt(question, chunks)
 
     config = MODEL_CONFIGS.get(model_name, MODEL_CONFIGS["mimo"])
-    client = get_ai_client(model_name)
+    ai_client = get_ai_client(model_name)
 
     async def generate():
+        import queue
+        q = queue.Queue()
+
+        def stream_worker():
+            full = ""
+            with ai_client.messages.stream(
+                model=config["model_name"],
+                max_tokens=1024,
+                messages=[{"role": "user", "content": prompt}],
+            ) as stream:
+                for text in stream.text_stream:
+                    full += text
+                    q.put(text)
+            q.put(None)  # 结束标记
+            return full
+
+        import asyncio
+        loop = asyncio.get_event_loop()
+        future = loop.run_in_executor(None, stream_worker)
+
         full_answer = ""
-        with client.messages.stream(
-            model=config["model_name"],
-            max_tokens=1024,
-            messages=[{"role": "user", "content": prompt}],
-        ) as stream:
-            for text in stream.text_stream:
-                full_answer += text
-                yield f"data: {json.dumps({'text': text, 'done': False})}\n\n"
+        while True:
+            chunk = await loop.run_in_executor(None, q.get)
+            if chunk is None:
+                break
+            full_answer += chunk
+            yield f"data: {json.dumps({'text': chunk, 'done': False})}\n\n"
+
+        # 等待线程完成，获取完整回答
+        await future
 
         db = SessionLocal()
         try:
-            db.add(models.ChatHistory(question=question, answer=full_answer))
+            db.add(models.ChatHistory(
+                question=question,
+                answer=full_answer,
+                conversation_id=conversation_id
+            ))
             db.commit()
         finally:
             db.close()
 
-        # 发送完成信号
-        yield f"data: {json.dumps({'text': '', 'done': True, 'references': [c['text'] for c in chunks]})}\n\n"
+        yield f"data: {json.dumps({'text': '', 'done': True, 'conversation_id': conversation_id, 'references': [c['text'] for c in chunks]})}\n\n"
 
     return StreamingResponse(
         generate(),
@@ -207,6 +404,9 @@ async def chat_stream(request: schemas.ChatRequest):
             "Connection": "keep-alive",
         }
     )
+
+
+# ========== 文档上传接口 ==========
 
 @app.post("/upload/")
 async def upload_file(file: UploadFile):
@@ -218,7 +418,6 @@ async def upload_file(file: UploadFile):
     text = extract_text(filepath)
     chunks = split_text(text)
 
-    # 删除同一文件的旧数据（如果重新上传）
     try:
         ids_to_delete = []
         for i in range(100):
@@ -233,7 +432,6 @@ async def upload_file(file: UploadFile):
     except Exception:
         pass
 
-    # 把每块变成向量并存入 ChromaDB
     for i, chunk in enumerate(chunks):
         vector = get_embedding(chunk)
         collection.add(
@@ -256,9 +454,3 @@ async def search_data(question: str):
         "question": question,
         "results": results
     }
-    
-
-
-
-
-
