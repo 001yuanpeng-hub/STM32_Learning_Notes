@@ -13,10 +13,14 @@ import schemas
 import chromadb
 import os
 import json
+import redis
+import hashlib
 
 load_dotenv()
 
 app = FastAPI()
+
+redis_client = redis.from_url("redis://localhost:6379/0", decode_responses=True)
 
 # 模型配置（都是 Anthropic 兼容 API）
 MODEL_CONFIGS = {
@@ -90,25 +94,6 @@ def search(query: str, top_k: int = 3) -> list[dict]:
         for doc, meta in zip(documents, metadatas)
     ]
 
-def is_meta_question(question: str) -> bool:
-    """判断是否为关于系统/文档状态的元问题"""
-    meta_keywords = ["上传了", "有没有文件", "有哪些文档", "文件列表", "文档数量", "几个文件", "多少文档"]
-    return any(kw in question for kw in meta_keywords)
-
-def get_document_status() -> str:
-    """查询当前系统的文档状态"""
-    count = collection.count()
-    if count == 0:
-        return "当前系统中没有上传任何文档。请先上传文件后再提问。"
-    # 获取所有文档的元数据
-    results = collection.get(include=["metadatas"])
-    filenames = set()
-    for meta in results["metadatas"]:
-        if meta and "filename" in meta:
-            filenames.add(meta["filename"])
-    file_list = "\n".join([f"- {name}" for name in sorted(filenames)])
-    return f"当前系统中共有 {count} 个文档片段，来自以下 {len(filenames)} 个文件：\n{file_list}"
-
 def build_prompt(question: str, chunks: list[dict]) -> str:
     context_parts = []
     for chunk in chunks:
@@ -126,7 +111,7 @@ def build_prompt(question: str, chunks: list[dict]) -> str:
 - 优先基于参考资料回答
 - 如果参考资料与问题相关性不高，尽量从已有内容中提取有用信息回答，不要直接拒绝
 - 只有当参考资料完全无关时，才说"未找到相关内容，建议换个方式提问"
-- 对于日常问候（如 hello、你好），自然回应即可
+- 对于日常问候(如 hello、你好),自然回应即可
 
 参考资料：
 {context}
@@ -258,22 +243,6 @@ async def chat(request: schemas.ChatRequest):
             db.refresh(conv)
             conversation_id = conv.id
 
-        # 元问题：直接返回文档状态，不走 RAG
-        if is_meta_question(question):
-            answer = get_document_status()
-            db.add(models.ChatHistory(
-                question=question,
-                answer=answer,
-                conversation_id=conversation_id
-            ))
-            db.commit()
-            return {
-                "question": question,
-                "answer": answer,
-                "references": [],
-                "conversation_id": conversation_id
-            }
-
         chunks = search(question, top_k=3)
         prompt = build_prompt(question, chunks)
 
@@ -321,26 +290,19 @@ async def chat_stream(request: schemas.ChatRequest):
 
     db.close()
 
-    # 元问题：直接返回文档状态，不走 RAG
-    if is_meta_question(question):
-        answer = get_document_status()
-        db2 = SessionLocal()
-        try:
-            db2.add(models.ChatHistory(
-                question=question,
-                answer=answer,
-                conversation_id=conversation_id
-            ))
-            db2.commit()
-        finally:
-            db2.close()
+    cache_key = "chat:" + hashlib.md5(question.encode()).hexdigest()
 
-        async def generate_meta():
-            yield f"data: {json.dumps({'text': answer, 'done': False})}\n\n"
-            yield f"data: {json.dumps({'text': '', 'done': True, 'conversation_id': conversation_id, 'references': []})}\n\n"
+    try:
+        cached = redis_client.get(cache_key)
+    except Exception:
+        cached = None
 
+    if cached:
+        async def return_cached():
+            yield f'data: {{"text": "{cached.decode()}", "done": false}}\n\n'
+            yield f'data: {{"text": "", "done": true, "conversation_id": {conversation_id}}}\n\n'
         return StreamingResponse(
-            generate_meta(),
+            return_cached(),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "Connection": "keep-alive"}
         )
@@ -382,6 +344,11 @@ async def chat_stream(request: schemas.ChatRequest):
 
         # 等待线程完成，获取完整回答
         await future
+
+        try:
+            redis_client.set(cache_key, full_answer, ex=60)
+        except Exception:
+            pass
 
         db = SessionLocal()
         try:
