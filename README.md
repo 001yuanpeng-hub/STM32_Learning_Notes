@@ -6,7 +6,7 @@
 
 | 类别 | 技术 |
 |------|------|
-| 后端 | FastAPI + SQLAlchemy + MySQL |
+| 后端 | FastAPI + SQLAlchemy + MySQL + Redis |
 | 前端 | Vue3 + Vite |
 | 向量数据库 | ChromaDB |
 | Embedding | bge-small-zh-v1.5 |
