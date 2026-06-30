@@ -62,13 +62,19 @@ CLAUDE_BASE_URL=https://api.anthropic.com
 
 # MySQL
 DATABASE_URL=mysql+pymysql://root:root@localhost:3306/fastapi_db
+
+# Redis（可选，默认 localhost:6379）
+REDIS_URL=redis://localhost:6379/0
 ```
 
 ```bash
-# 2. 启动后端
+# 2. 启动 Redis（本地安装或 Docker）
+docker run -d -p 6379:6379 redis:7
+
+# 3. 启动后端
 cd backend && pip install -r requirements.txt && uvicorn main:app --reload
 
-# 3. 启动前端
+# 4. 启动前端
 cd frontend && npm install && npm run dev
 
 # 打开浏览器 http://localhost:5173
@@ -109,6 +115,30 @@ docker-compose up -d --build
 用户提问 → 文本向量化 → ChromaDB 语义检索 Top-3
     → 构建 Prompt（指令 + 上下文 + 问题）
     → LLM 生成回答 → SSE 流式返回
+```
+
+## Redis 缓存
+
+**为什么用 Redis？**
+- 减少重复调用 AI API，节省 token 成本
+- 提升接口响应速度（缓存命中时）
+- 防止接口被滥用（限流）
+
+**Redis 使用场景**：
+
+| 数据类型 | Key | 用途 | TTL |
+|----------|-----|------|-----|
+| String | `chat:{hash}` | 接口缓存（相同问题 60s 内直接返回） | 60s |
+| String | `rate:{ip}` | IP 限流（每分钟最多 10 次请求） | 60s |
+| Hash | `conv:{id}` | 对话元数据（标题、创建时间） | 无 |
+| Set | `conv:ids` | 对话 ID 集合 | 无 |
+| List | `conv:{id}:messages` | 对话消息缓存（最近 50 条） | 无 |
+| Sorted Set | `conv:active` | 最近活跃对话排序 | 无 |
+
+**工作原理**：
+```
+用户提问 → 检查 Redis 缓存 → 命中？直接返回
+                          → 未命中？调用 AI → 结果写入缓存 → 返回
 ```
 
 ## 演示
