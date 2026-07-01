@@ -1,6 +1,7 @@
-from fastapi import FastAPI, UploadFile, HTTPException, Request
+from fastapi import FastAPI, UploadFile, HTTPException, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from sqlalchemy.orm import Session 
 from PyPDF2 import PdfReader
 from docx import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -37,6 +38,13 @@ MODEL_CONFIGS = {
         "base_url": os.getenv("CLAUDE_BASE_URL"),
     },
 }
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
 def get_ai_client(model_name: str):
     """根据模型名称返回对应的 AI 客户端"""
@@ -125,202 +133,172 @@ def build_prompt(question: str, chunks: list[dict]) -> str:
 # ========== 对话管理接口 ==========
 
 @app.post("/conversations/", response_model=schemas.ConversationResponse)
-async def create_conversation(request: schemas.ConversationCreate):
-    db = SessionLocal()
-    try:
-        title = request.title or "新对话"
-        conv = models.Conversation(title=title)
-        db.add(conv)
-        db.commit()
-        db.refresh(conv)
+async def create_conversation(request: schemas.ConversationCreate, db: Session = Depends(get_db)):
+    title = request.title or "新对话"
+    conv = models.Conversation(title=title)
+    db.add(conv)
+    db.commit()
+    db.refresh(conv)
 
-        redis_client.hset(
-            f"conv:{conv.id}", mapping={
-                "title": conv.title,
-                "created_at": conv.created_at.isoformat()
-            }
-        )
-
-        redis_client.sadd("conv:ids", conv.id)
-        redis_client.zadd("conv:active", {conv.id: time.time()})
-        return {
-            "id": conv.id,
+    redis_client.hset(
+        f"conv:{conv.id}", mapping={
             "title": conv.title,
-            "created_at": conv.created_at
+            "created_at": conv.created_at.isoformat()
         }
-    finally:
-        db.close()
+    )
+
+    redis_client.sadd("conv:ids", conv.id)
+    redis_client.zadd("conv:active", {conv.id: time.time()})
+    return {
+        "id": conv.id,
+        "title": conv.title,
+        "created_at": conv.created_at
+    }
 
 @app.get("/conversations/")
-async def list_conversations():
-    db = SessionLocal()
+async def list_conversations(db: Session = Depends(get_db)):
+    convs = []
     try:
-        convs = []
-        try:
-            ids = redis_client.zrevrange("conv:active", 0, -1)
-            if ids:
-                for id in ids:
-                    try:
-                        conv = redis_client.hgetall(f"conv:{id}")
-                        if conv:
-                            convs.append({
-                                "id": int(id),
-                                "title": conv["title"],
-                                "created_at": conv["created_at"]
-                            })
-                    except Exception:
-                        continue
-        except Exception:
-            pass
-        if not convs:
-            convs = db.query(models.Conversation).order_by(models.Conversation.created_at.desc()).all()
-            return [
-                {
-                    "id": c.id,
-                    "title": c.title,
-                    "created_at": c.created_at.isoformat()
-                }
-                for c in convs
-            ]
-        return convs
-    finally:
-        db.close()
+        ids = redis_client.zrevrange("conv:active", 0, -1)
+        if ids:
+            for id in ids:
+                try:
+                    conv = redis_client.hgetall(f"conv:{id}")
+                    if conv:
+                        convs.append({
+                            "id": int(id),
+                            "title": conv["title"],
+                            "created_at": conv["created_at"]
+                        })
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    if not convs:
+        convs = db.query(models.Conversation).order_by(models.Conversation.created_at.desc()).all()
+        return [
+            {
+                "id": c.id,
+                "title": c.title,
+                "created_at": c.created_at.isoformat()
+            }
+            for c in convs
+        ]
+    return convs
 
 @app.get("/conversations/{conversation_id}/messages")
-async def get_conversation_messages(conversation_id: int):
-    db = SessionLocal()
+async def get_conversation_messages(conversation_id: int, db: Session = Depends(get_db)):
+
     try:
-        try:
-            redis_client.zadd("conv:active", {conversation_id:time.time()})
-        except Exception:
-            pass
+        redis_client.zadd("conv:active", {conversation_id:time.time()})
+    except Exception:
+        pass
 
-        try:
-            cached = redis_client.lrange(f'conv:{conversation_id}:messages', 0, -1)
-            if cached:
-                messages = [json.loads(msg) for msg in cached]
-                messages.reverse()
-                return messages
-        except Exception:
-            pass
+    try:
+        cached = redis_client.lrange(f'conv:{conversation_id}:messages', 0, -1)
+        if cached:
+            messages = [json.loads(msg) for msg in cached]
+            messages.reverse()
+            return messages
+    except Exception:
+        pass
 
-        conv = db.query(models.Conversation).filter(models.Conversation.id == conversation_id).first()
-        if not conv:
-            raise HTTPException(status_code=404, detail="对话不存在")
-        messages = db.query(models.ChatHistory).filter(
-            models.ChatHistory.conversation_id == conversation_id
-        ).order_by(models.ChatHistory.created_at.asc()).all()
-        return [
-            {
-                "id": m.id,
-                "question": m.question,
-                "answer": m.answer,
-                "created_at": m.created_at.isoformat()
-            }
-            for m in messages
-        ]
-    finally:
-        db.close()
+    conv = db.query(models.Conversation).filter(models.Conversation.id == conversation_id).first()
+    if not conv:
+        raise HTTPException(status_code=404, detail="对话不存在")
+    messages = db.query(models.ChatHistory).filter(
+        models.ChatHistory.conversation_id == conversation_id
+    ).order_by(models.ChatHistory.created_at.asc()).all()
+    return [
+        {
+            "id": m.id,
+            "question": m.question,
+            "answer": m.answer,
+            "created_at": m.created_at.isoformat()
+        }
+        for m in messages
+    ]
 
 @app.delete("/conversations/{conversation_id}")
-async def delete_conversation(conversation_id: int):
-    db = SessionLocal()
-    try:
-        conv = db.query(models.Conversation).filter(models.Conversation.id == conversation_id).first()
-        if not conv:
-            raise HTTPException(status_code=404, detail="对话不存在")
-        db.delete(conv)
-        db.commit()
+async def delete_conversation(conversation_id: int, db: Session = Depends(get_db)):
+    conv = db.query(models.Conversation).filter(models.Conversation.id == conversation_id).first()
+    if not conv:
+        raise HTTPException(status_code=404, detail="对话不存在")
+    db.delete(conv)
+    db.commit()
 
-        redis_client.delete(f"conv:{conversation_id}")
-        redis_client.srem("conv:ids", conversation_id)
-        redis_client.delete(f"conv:{conversation_id}:messages")
-        redis_client.zrem("conv:active", conversation_id)
-        return {"message": "已删除"}
-    finally:
-        db.close()
+    redis_client.delete(f"conv:{conversation_id}")
+    redis_client.srem("conv:ids", conversation_id)
+    redis_client.delete(f"conv:{conversation_id}:messages")
+    redis_client.zrem("conv:active", conversation_id)
+    return {"message": "已删除"}
 
 @app.patch("/conversations/{conversation_id}")
-async def rename_conversation(conversation_id: int, request: schemas.ConversationCreate):
-    db = SessionLocal()
-    try:
-        conv = db.query(models.Conversation).filter(models.Conversation.id == conversation_id).first()
-        if not conv:
-            raise HTTPException(status_code=404, detail="对话不存在")
-        conv.title = request.title
-        db.commit()
-        redis_client.hset(f"conv:{conversation_id}", "title", request.title)
-        return {"id": conv.id, "title": conv.title, "created_at": conv.created_at.isoformat()}
-    finally:
-        db.close()
-
-
-# ========== 聊天接口 ==========
+async def rename_conversation(conversation_id: int, request: schemas.ConversationCreate, db: Session = Depends(get_db)):
+    conv = db.query(models.Conversation).filter(models.Conversation.id == conversation_id).first()
+    if not conv:
+        raise HTTPException(status_code=404, detail="对话不存在")
+    conv.title = request.title
+    db.commit()
+    redis_client.hset(f"conv:{conversation_id}", "title", request.title)
+    return {"id": conv.id, "title": conv.title, "created_at": conv.created_at.isoformat()}
 
 @app.get("/history/")
-async def get_history(conversation_id: int = None):
-    db = SessionLocal()
-    try:
-        query = db.query(models.ChatHistory)
-        if conversation_id:
-            query = query.filter(models.ChatHistory.conversation_id == conversation_id)
-        records = query.order_by(models.ChatHistory.created_at.asc()).all()
-        return [
-            {
-                "id": r.id,
-                "question": r.question,
-                "answer": r.answer,
-                "created_at": r.created_at.isoformat()
-            }
-            for r in records
-        ]
-    finally:
-        db.close()
+async def get_history(conversation_id: int = None, db: Session = Depends(get_db)):
+    query = db.query(models.ChatHistory)
+    if conversation_id:
+        query = query.filter(models.ChatHistory.conversation_id == conversation_id)
+    records = query.order_by(models.ChatHistory.created_at.asc()).all()
+    return [
+        {
+            "id": r.id,
+            "question": r.question,
+            "answer": r.answer,
+            "created_at": r.created_at.isoformat()
+        }
+        for r in records
+    ]
 
 @app.post("/chat/", response_model=schemas.ChatResponse)
-async def chat(request: schemas.ChatRequest):
+async def chat(request: schemas.ChatRequest, db: Session = Depends(get_db)):
     question = request.question
     model_name = request.model or "mimo"
     conversation_id = request.conversation_id
 
-    db = SessionLocal()
-    try:
-        # 如果没有 conversation_id，自动创建新对话
-        if not conversation_id:
-            title = question[:20] + ("..." if len(question) > 20 else "")
-            conv = models.Conversation(title=title)
-            db.add(conv)
-            db.commit()
-            db.refresh(conv)
-            conversation_id = conv.id
-
-        chunks = search(question, top_k=3)
-        prompt = build_prompt(question, chunks)
-
-        config = MODEL_CONFIGS.get(model_name, MODEL_CONFIGS["mimo"])
-        ai_client = get_ai_client(model_name)
-        response = ai_client.messages.create(
-            model=config["model_name"],
-            max_tokens=1024,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        answer = response.content[0].text
-
-        db.add(models.ChatHistory(
-            question=question,
-            answer=answer,
-            conversation_id=conversation_id
-        ))
+    # 如果没有 conversation_id，自动创建新对话
+    if not conversation_id:
+        title = question[:20] + ("..." if len(question) > 20 else "")
+        conv = models.Conversation(title=title)
+        db.add(conv)
         db.commit()
+        db.refresh(conv)
+        conversation_id = conv.id
 
-        return {
-            "question": question,
-            "answer": answer,
-            "references": [c["text"] for c in chunks],
-            "conversation_id": conversation_id
-        }
-    finally:
-        db.close()
+    chunks = search(question, top_k=3)
+    prompt = build_prompt(question, chunks)
+
+    config = MODEL_CONFIGS.get(model_name, MODEL_CONFIGS["mimo"])
+    ai_client = get_ai_client(model_name)
+    response = ai_client.messages.create(
+        model=config["model_name"],
+        max_tokens=1024,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    answer = response.content[0].text
+
+    db.add(models.ChatHistory(
+        question=question,
+        answer=answer,
+        conversation_id=conversation_id
+    ))
+    db.commit()
+
+    return {
+        "question": question,
+        "answer": answer,
+        "references": [c["text"] for c in chunks],
+        "conversation_id": conversation_id
+    }
 
 @app.post("/chat/stream/")
 async def chat_stream(body: schemas.ChatRequest, request: Request):
