@@ -1,146 +1,136 @@
 # RAG 知识库
 
-> 上传文档，基于内容智能问答。支持流式回答、多模型切换。
+一个基于 RAG（检索增强生成）的文档问答系统。上传 PDF/TXT/DOCX 等文档，系统自动分块向量化，之后可以用自然语言提问，AI 会基于文档内容回答。
 
-## 技术栈
+## 为什么做这个
 
-| 类别 | 技术 |
-|------|------|
-| 后端 | FastAPI + SQLAlchemy + MySQL + Redis |
-| 前端 | Vue3 + Vite |
-| 向量数据库 | ChromaDB |
-| Embedding | bge-small-zh-v1.5 |
-| AI 模型 | MiMo / Claude (Anthropic 兼容 API) |
-| 部署 | Docker + Nginx |
+想动手理解 RAG 的完整链路：文档解析 → 分块 → Embedding → 向量检索 → Prompt 构建 → LLM 生成。不只是调 API，而是把每个环节串起来跑通，踩一遍坑。
+
+## 技术选型及原因
+
+**Embedding 模型：bge-small-zh-v1.5**
+- 试过几个中文 Embedding 模型，bge-small 在中文语义检索上效果够用，且模型体积小（~90MB），CPU 也能跑，不用 GPU
+- 没选更大的 bge-large 是因为个人项目数据量小，小模型性价比更高
+
+**向量数据库：ChromaDB**
+- 选 ChromaDB 而不是 Milvus/Weaviate，因为它是嵌入式的，不需要额外部署服务，本地开发友好
+- 缺点是数据量大了性能会下降，但个人项目够用
+
+**分块策略：chunk_size=500, overlap=50**
+- 试过 200/300/500/1000 不同大小。200 太碎，语义断裂严重；1000 太大，检索召回的内容不够精确
+- 500 字大约是一两个段落的长度，问答效果和检索精度的平衡点
+- overlap=50 是为了防止在句子中间切断导致语义丢失
+
+**LLM：MiMo / Claude 双模型**
+- MiMo 是小米的模型，中文效果不错且便宜
+- Claude 作为备选，回答质量更稳定
+- 两个都走 Anthropic 兼容 API，代码层面统一处理
+
+## 踩过的坑
+
+### SSE 流式输出
+
+Anthropic Python SDK 的 `messages.stream()` 是同步的，但 FastAPI 的 `StreamingResponse` 需要 async generator。直接用会阻塞事件循环。
+
+解决方案：用 `queue.Queue` 做线程间通信，后台线程跑同步流式调用，把 chunk 塞进队列，async generator 从队列取数据 yield 给前端。再用 `run_in_executor` 把队列的 `get()` 放到线程池避免阻塞。
+
+```python
+# 简化示意
+async def generate():
+    q = queue.Queue()
+    def worker():
+        with client.messages.stream(...) as stream:
+            for text in stream.text_stream:
+                q.put(text)
+        q.put(None)  # 结束标记
+    
+    loop.run_in_executor(None, worker)
+    while True:
+        chunk = await loop.run_in_executor(None, q.get)
+        if chunk is None: break
+        yield f"data: {json.dumps({'text': chunk})}\n\n"
+```
+
+### Vite 代理 SSE 不生效
+
+开发模式下 Vite 的 http-proxy 会缓冲 SSE 响应，导致前端收不到流式数据。
+
+解决：在 vite.config.js 的 proxy 配置里加 `onProxyReq` 把 `Connection` header 设为空字符串，阻止代理接管连接。
+
+### Nginx SSE 缓冲
+
+生产环境 Nginx 默认会缓冲 proxy 响应，SSE 同样失效。
+
+解决：nginx.conf 里对 `/api/` 路径关闭 `proxy_buffering` 和 `proxy_cache`。
+
+### Redis decode 问题
+
+一开始 Redis 连接没设 `decode_responses=True`，存进去的是 bytes，取出来需要 `.decode()`，但某些操作（比如 `hgetall`）返回的嵌套结构 decode 很麻烦。加上 `decode_responses=True` 后统一返回 str，省了很多处理。
 
 ## 功能
 
-- 支持上传 TXT、PDF、DOCX、Markdown 文档
-- 自动分块并向量化存储到 ChromaDB
-- 基于语义检索的智能问答（非关键词匹配）
-- SSE 流式回答，打字机效果实时展示
-- 支持 MiMo / Claude 模型一键切换
-- 聊天历史持久化存储，页面刷新不丢失
-- 侧边栏对话管理，支持新建、切换、重命名、删除
+- 上传文档（TXT/PDF/DOCX/MD），自动分块存入 ChromaDB
+- 基于语义检索的问答，不是关键词匹配
+- SSE 流式回答，打字机效果
+- MiMo / Claude 模型切换
+- 对话历史持久化（MySQL），页面刷新不丢
+- 侧边栏对话管理（新建/切换/重命名/删除）
+- Redis 缓存（相同问题 60s 内直接返回）+ IP 限流（10次/分钟）
 
 ## 项目结构
 
 ```
-├── backend/
-│   ├── main.py           # 核心逻辑：RAG 流程、API 路由、文档处理
-│   ├── models.py         # 数据库模型
-│   ├── schemas.py        # 请求/响应数据结构
-│   ├── database.py       # 数据库连接配置
-│   ├── requirements.txt  # Python 依赖
-│   └── .env.example      # 环境变量模板
-├── frontend/
-│   ├── src/
-│   │   ├── App.vue
-│   │   └── components/
-│   │       ├── ChatBox.vue  # 聊天界面核心组件
-│   │       └── Sidebar.vue  # 侧边栏对话管理
-│   ├── vite.config.js    # Vite 配置（含 API 代理）
-│   └── package.json
-└── docker-compose.yml    # 一键容器化部署
+backend/
+├── main.py           # 核心逻辑：RAG 流程、API 路由、文档处理
+├── models.py         # SQLAlchemy 数据库模型
+├── schemas.py        # Pydantic 请求/响应结构
+├── database.py       # MySQL 连接配置
+└── requirements.txt
+
+frontend/
+├── src/
+│   ├── App.vue
+│   └── components/
+│       ├── ChatBox.vue   # 聊天界面核心（含 SSE 流式读取）
+│       └── Sidebar.vue   # 侧边栏对话管理
+├── vite.config.js        # 含 API 代理 + SSE workaround
+└── nginx.conf            # 生产环境 Nginx（SSE 优化）
+
+docker-compose.yml        # MySQL + Redis + Backend + Frontend
 ```
 
 ## 本地运行
 
 ```bash
-# 1. 配置环境变量
+# 配置环境变量
 cp backend/.env.example backend/.env
-```
+# 编辑 .env 填入 API Key
 
-编辑 `backend/.env`
-
-```env
-# MiMo / Claude API
-ANTHROPIC_API_KEY=your_api_key
-ANTHROPIC_BASE_URL=https://api.xiaomimimo.com/anthropic
-CLAUDE_API_KEY=your_api_key
-CLAUDE_BASE_URL=https://api.anthropic.com
-
-# MySQL
-DATABASE_URL=mysql+pymysql://root:root@localhost:3306/fastapi_db
-
-# Redis（可选，默认 localhost:6379）
-REDIS_URL=redis://localhost:6379/0
-```
-
-```bash
-# 2. 启动 Redis（本地安装或 Docker）
+# 启动 Redis
 docker run -d -p 6379:6379 redis:7
 
-# 3. 启动后端
-cd backend && pip install -r requirements.txt && uvicorn main:app --reload
+# 后端
+cd backend
+pip install -r requirements.txt
+uvicorn main:app --reload
 
-# 4. 启动前端
-cd frontend && npm install && npm run dev
-
-# 打开浏览器 http://localhost:5173
+# 前端
+cd frontend
+npm install
+npm run dev
 ```
 
 ## Docker 部署
 
-在项目根目录创建 `.env` 文件：
-
-```env
-# MiMo / Claude API
-ANTHROPIC_API_KEY=your_api_key
-ANTHROPIC_BASE_URL=https://api.xiaomimimo.com/anthropic
-CLAUDE_API_KEY=your_api_key
-CLAUDE_BASE_URL=https://api.anthropic.com
-```
-
 ```bash
+# 根目录创建 .env，填入 API Key
 docker-compose up -d --build
 # 访问 http://localhost
 ```
 
-## API 接口
+## 已知问题
 
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| `POST` | `/upload/` | 上传文档，自动分块并向量化 |
-| `POST` | `/chat/stream/` | 流式问答（SSE 逐步返回） |
-| `GET` | `/conversations/` | 获取对话列表 |
-| `POST` | `/conversations/` | 创建新对话 |
-| `GET` | `/conversations/{id}/messages` | 获取对话消息 |
-| `DELETE` | `/conversations/{id}` | 删除对话 |
-| `PATCH` | `/conversations/{id}` | 重命名对话 |
-
-## RAG 流程
-
-```
-用户提问 → 文本向量化 → ChromaDB 语义检索 Top-3
-    → 构建 Prompt（指令 + 上下文 + 问题）
-    → LLM 生成回答 → SSE 流式返回
-```
-
-## Redis 缓存
-
-**为什么用 Redis？**
-- 减少重复调用 AI API，节省 token 成本
-- 提升接口响应速度（缓存命中时）
-- 防止接口被滥用（限流）
-
-**Redis 使用场景**：
-
-| 数据类型 | Key | 用途 | TTL |
-|----------|-----|------|-----|
-| String | `chat:{hash}` | 接口缓存（相同问题 60s 内直接返回） | 60s |
-| String | `rate:{ip}` | IP 限流（每分钟最多 10 次请求） | 60s |
-| Hash | `conv:{id}` | 对话元数据（标题、创建时间） | 无 |
-| Set | `conv:ids` | 对话 ID 集合 | 无 |
-| List | `conv:{id}:messages` | 对话消息缓存（最近 50 条） | 无 |
-| Sorted Set | `conv:active` | 最近活跃对话排序 | 无 |
-
-**工作原理**：
-```
-用户提问 → 检查 Redis 缓存 → 命中？直接返回
-                          → 未命中？调用 AI → 结果写入缓存 → 返回
-```
-
-## 演示
-
-![demo](./demo.gif)
+- 文件上传没有做文件名消毒，存在路径遍历风险
+- CORS 设为 `*`，生产环境需要收紧
+- 错误处理用了大量 `except Exception: pass`，调试时不好定位问题
+- 没有用户认证，所有人共享同一个知识库
